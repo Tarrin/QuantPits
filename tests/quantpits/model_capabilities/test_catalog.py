@@ -17,8 +17,8 @@ def _not_importable(_module, _class_name):
 def test_repository_wrapper_inventory_equals_declared_inventory():
     filesystem = repository_wrapper_inventory()
     declared = tuple(module for module, _class_name in declared_repository_models())
-    assert len(filesystem) == 43
-    assert len(declared) == 43
+    assert len(filesystem) == 44
+    assert len(declared) == 44
     assert filesystem == declared
     assert "quantpits.utils.model_wrappers.custom.pytorch_add" in filesystem
     assert any(item.model_class == "ADD" for item in AUTHORITATIVE_CATALOG)
@@ -64,7 +64,7 @@ def test_catalog_rows_are_atomic_and_cover_action_family_vocabularies():
     identities = [item.to_public_dict() for item in AUTHORITATIVE_CATALOG]
     assert {item["action"] for item in identities} == {"train", "incremental", "predict_only", "resume"}
     assert {item["execution_family"] for item in identities} == {"static", "cpcv", "rolling", "cpcv_rolling"}
-    assert len(identities) == 704
+    assert len(identities) == 720
     assert len(identities) == len({
         tuple(sorted((key, str(value)) for key, value in item.items() if key not in ("required_predicates", "required")))
         for item in identities

@@ -40,6 +40,7 @@ _CUSTOM_ONLY_MODELS = (
     ("pytorch_lstm_ic_loss", "LSTMICModel", "time_series"),
     ("pytorch_lstm_rank", "LSTMRankModel", "time_series"),
     ("pytorch_tcts", "TCTS", "multi_label"),
+    ("pytorch_tsmixer", "TSMixer", "time_series"),
 )
 
 _DATASET = {
