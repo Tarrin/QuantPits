@@ -17,6 +17,7 @@ import os
 import yaml
 import json
 import importlib
+from numbers import Integral
 import pandas as pd
 import numpy as np
 from quantpits.utils import env
@@ -93,14 +94,49 @@ class OrderGenerator:
         raise NotImplementedError
 
 
+def _validate_rank_buffer_params(topk, buy_rank=None, sell_rank=None, n_drop=None, *, required=False):
+    """Validate optional rank-buffer thresholds without changing legacy defaults."""
+    if buy_rank is None and sell_rank is None:
+        if required:
+            raise ValueError("rank_buffer requires both buy_rank and sell_rank")
+        return
+    if buy_rank is None or sell_rank is None:
+        raise ValueError("buy_rank and sell_rank must be provided together")
+    if isinstance(topk, bool) or not isinstance(topk, Integral) or topk <= 0:
+        raise ValueError("rank_buffer topk must be a positive integer")
+    if (
+        isinstance(n_drop, bool) or not isinstance(n_drop, Integral) or n_drop < 0 or n_drop > topk
+    ):
+        raise ValueError("rank_buffer n_drop must be a non-negative integer no greater than topk")
+    if any(
+        isinstance(value, bool) or not isinstance(value, Integral) or value <= 0
+        for value in (buy_rank, sell_rank)
+    ):
+        raise ValueError("buy_rank and sell_rank must be positive integers")
+    if topk > buy_rank or buy_rank > sell_rank:
+        raise ValueError("rank thresholds must satisfy topk <= buy_rank <= sell_rank")
+
+
 class TopkDropoutOrderGenerator(OrderGenerator):
     """对应 TopkDropoutStrategy 的订单生成"""
     
-    def __init__(self, topk=20, n_drop=3, buy_suggestion_factor=3, sell_out_of_universe=True, **kwargs):
+    def __init__(
+        self,
+        topk=20,
+        n_drop=3,
+        buy_suggestion_factor=3,
+        sell_out_of_universe=True,
+        buy_rank=None,
+        sell_rank=None,
+        **kwargs,
+    ):
+        _validate_rank_buffer_params(topk, buy_rank, sell_rank, n_drop)
         self.topk = topk
         self.drop_n = n_drop
         self.buy_suggestion_factor = buy_suggestion_factor
         self.sell_out_of_universe = sell_out_of_universe
+        self.buy_rank = buy_rank
+        self.sell_rank = sell_rank
 
     def analyze_positions_with_universe(self, pred_df, price_df, current_holding, universe_snapshot=None):
         """Classify every account holding and calculate universe-aware turnover."""
@@ -136,7 +172,11 @@ class TopkDropoutOrderGenerator(OrderGenerator):
         ranked = merged.loc[usable].copy()
         if eligible is not None:
             ranked = ranked[ranked["instrument"].isin(eligible)]
-        ranked = ranked.sort_values("score", ascending=False).set_index("instrument")
+        if self.buy_rank is None:
+            ranked = ranked.sort_values("score", ascending=False).set_index("instrument")
+        else:
+            ranked["score"] = pd.to_numeric(ranked["score"], errors="coerce")
+            ranked = ranked.sort_values("score", ascending=False, kind="mergesort").set_index("instrument")
 
         ranked_ids = set(ranked.index)
         forced_ids = holding_set - eligible if eligible is not None else set()
@@ -169,14 +209,20 @@ class TopkDropoutOrderGenerator(OrderGenerator):
         else:
             forced = forced.set_index("instrument")
 
-        buffer = ranked.head(self.topk + self.drop_n * self.buy_suggestion_factor)
         normal_slots = max(self.drop_n - len(forced_ids), 0)
         ranked_holdings = ranked[ranked.index.isin(ranked_holding_ids)]
-        normal = ranked_holdings[~ranked_holdings.index.isin(buffer.index)].tail(normal_slots)
+        if self.buy_rank is None:
+            buffer = ranked.head(self.topk + self.drop_n * self.buy_suggestion_factor)
+            normal = ranked_holdings[~ranked_holdings.index.isin(buffer.index)].tail(normal_slots)
+            buy_pool = buffer
+        else:
+            sell_ids = set(ranked.index[self.sell_rank:])
+            normal = ranked_holdings[ranked_holdings.index.isin(sell_ids)].tail(normal_slots)
+            buy_pool = ranked.head(self.buy_rank)
         executable_ids = set(forced.index) | set(normal.index)
         remaining = len(holding_ids) - len(executable_ids)
         target_buy_count = max(self.topk - remaining, 0)
-        buy = buffer[~buffer.index.isin(holding_set)].head(
+        buy = buy_pool[~buy_pool.index.isin(holding_set)].head(
             target_buy_count * self.buy_suggestion_factor
         )
         continuing = ranked_holdings[~ranked_holdings.index.isin(normal.index)]
@@ -204,6 +250,21 @@ class TopkDropoutOrderGenerator(OrderGenerator):
         )
     
     def analyze_positions(self, pred_df, price_df, current_holding):
+        if self.buy_rank is not None:
+            result = self.analyze_positions_with_universe(
+                pred_df, price_df, current_holding, universe_snapshot=None
+            )
+            sell_ids = set(result.normal_sell_candidates.index)
+            held_ids = [item["instrument"] for item in current_holding if item["instrument"] not in sell_ids]
+            hold_final = result.sorted_ranking.reindex(held_ids)
+            return (
+                hold_final,
+                result.normal_sell_candidates,
+                result.buy_candidates,
+                result.sorted_ranking,
+                result.target_buy_count,
+            )
+
         top_k = self.topk
         drop_n = self.drop_n
         buy_suggestion_factor = self.buy_suggestion_factor
@@ -300,7 +361,11 @@ STRATEGY_REGISTRY = {
     "topk_dropout": {
         "backtest_class": "qlib.contrib.strategy.TopkDropoutStrategy",
         "order_generator_class": TopkDropoutOrderGenerator,
-    }
+    },
+    "rank_buffer": {
+        "backtest_class": "quantpits.utils.rank_buffer_strategy.RankBufferStrategy",
+        "order_generator_class": TopkDropoutOrderGenerator,
+    },
 }
 
 
@@ -333,6 +398,12 @@ def create_order_generator(config_dict=None) -> OrderGenerator:
     
     if name not in STRATEGY_REGISTRY:
         raise ValueError(f"Strategy '{name}' not found in STRATEGY_REGISTRY")
+
+    if name == "rank_buffer":
+        _validate_rank_buffer_params(
+            params.get("topk"), params.get("buy_rank"), params.get("sell_rank"),
+            params.get("n_drop"), required=True,
+        )
         
     cls = STRATEGY_REGISTRY[name]["order_generator_class"]
     return cls(**params)

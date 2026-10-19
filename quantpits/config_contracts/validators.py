@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from numbers import Integral
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
@@ -108,8 +109,8 @@ def validate_strategy_config(data: Dict[str, Any], *, path: str = "config/strate
     params = strategy.get("params") if isinstance(strategy.get("params"), dict) else {}
     if not strategy.get("name"):
         messages.append(_msg("error", "missing-strategy-name", path, "strategy.name is required."))
-    elif strategy.get("name") != "topk_dropout":
-        messages.append(_msg("warning", "unknown-strategy", path, "strategy.name is not topk_dropout."))
+    elif strategy.get("name") not in {"topk_dropout", "rank_buffer"}:
+        messages.append(_msg("warning", "unknown-strategy", path, "strategy.name is not topk_dropout or rank_buffer."))
     topk = params.get("topk")
     n_drop = params.get("n_drop")
     if not _is_positive_number(topk):
@@ -125,6 +126,44 @@ def validate_strategy_config(data: Dict[str, Any], *, path: str = "config/strate
             "error", "invalid-sell-out-of-universe", path,
             "strategy.params.sell_out_of_universe must be a boolean.",
         ))
+    if strategy.get("name") == "rank_buffer":
+        if isinstance(topk, bool) or not isinstance(topk, Integral) or topk <= 0:
+            messages.append(_msg(
+                "error", "invalid-topk-integer", path,
+                "rank_buffer strategy.params.topk must be a positive integer.",
+            ))
+        if isinstance(n_drop, bool) or not isinstance(n_drop, Integral) or n_drop < 0:
+            messages.append(_msg(
+                "error", "invalid-n-drop-integer", path,
+                "rank_buffer strategy.params.n_drop must be a non-negative integer.",
+            ))
+    rank_fields = ("buy_rank", "sell_rank")
+    rank_present = [field for field in rank_fields if field in params]
+    if strategy.get("name") == "rank_buffer" or rank_present:
+        missing = [field for field in rank_fields if field not in params]
+        for field in missing:
+            messages.append(_msg(
+                "error", f"missing-{field}", path,
+                f"strategy.params.{field} is required for rank_buffer.",
+            ))
+        valid_ranks = not missing
+        for field in rank_fields:
+            if field not in params:
+                continue
+            value = params[field]
+            if isinstance(value, bool) or not isinstance(value, Integral) or value <= 0:
+                messages.append(_msg(
+                    "error", f"invalid-{field}", path,
+                    f"strategy.params.{field} must be a positive integer.",
+                ))
+                valid_ranks = False
+        if valid_ranks and _is_number(topk) and not (
+            float(topk) <= int(params["buy_rank"]) <= int(params["sell_rank"])
+        ):
+            messages.append(_msg(
+                "error", "invalid-rank-order", path,
+                "strategy.params must satisfy topk <= buy_rank <= sell_rank.",
+            ))
     if not _is_number(backtest.get("account")):
         messages.append(_msg("error", "invalid-account", path, "backtest.account must be numeric."))
     exchange = backtest.get("exchange_kwargs")
