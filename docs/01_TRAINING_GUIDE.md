@@ -18,6 +18,11 @@ static/CPCV 的真实执行通过同一个 typed execution kernel 发布记录�
 本节完整契约当前只适用于 static/CPCV；Rolling/CPCV-rolling 仍使用既有独立流程。其真实变更
 命令仅共享 workspace training execution lease，尚未接入 State V3 与 publication coordinator。
 
+Qlib artifact 加固后的模型复用通过实际 API 签名兼容：自己的明确模型制品使用显式
+`trusted=True`，旧 API 保持原调用，数据制品仍默认加载。初次 fit 后应验证保存来源的
+reload／predict-only；无需因此修改模型参数或重训历史模型。依赖来源与缺失回溯规则见
+[Predict-Only 指南](05_PREDICT_ONLY_GUIDE.md)。
+
 ### Training Record V2
 
 新写入的训练记录使用 `schema_version: 2`。`model_records` 是权威身份表，每个
@@ -40,8 +45,18 @@ python -m quantpits.tools.audit_training_records \
 缺失的 backend，也不会写入 workspace。全量训练只有在所有目标都成功并生成 verified entry
 时才更新 current registry。
 
+审计自定义后端时，用 `--mlflow-uri` 显式指定实际 URI，例如
+`--mlflow-uri "sqlite:///$PWD/mlflow.db"`（在目标 workspace 下执行）。SQLite 的模型／预测制品
+也可存放在 `mlruns/`，不能仅凭该目录存在判断元数据后端。训练启动重新激活同一规范路径的
+workspace 时会保留已选的 `MLFLOW_TRACKING_URI`；切换到另一 workspace 时仍重新解析后端。
+
 生产者只有在输出 recorder 与持久化 `pred.pkl` 验证完成后才应发布 `ready` 条目。失败或
 跳过的模型不得替换已有 current pointer。
+
+静态 TRA 训练使用的 `MTSDatasetH` 从学习数据构造预测样本。训练仍保留 `DropnaLabel`，拟合完成后
+的预测和 `SignalRecord` 使用移除此处理器的独立预测数据集，使没有已实现标签的最新日期
+也能产生信号；其余学习／推理处理器及模型参数保持配置值。未知标签保留为空，不填零。
+普通 `DatasetH`／`TSDatasetH` 继续使用原数据集，预测覆盖校验仍依据实际保存的 `pred.pkl`。
 
 V2 使用严格版本分派：一旦声明 `schema_version: 2`，一致的 `models` 与 `model_records`
 映射就是必需项，不会退回顶层 V1 字段。`ready` 记录必须包含实际预测的 start/end/rows；

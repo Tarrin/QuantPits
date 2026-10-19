@@ -32,6 +32,34 @@ import numpy as np
 import pytest
 from unittest.mock import MagicMock, patch, mock_open, PropertyMock
 
+
+@pytest.fixture
+def mock_training_output_entry(monkeypatch):
+    """Isolate convergence/metrics units from persisted-output validation.
+
+    These units use model/recorder mocks and abbreviated historical dates.
+    Real signal persistence and ready-record coverage are exercised separately
+    in test_train_utils_pipeline.py, without this output-boundary stub.
+    """
+    from quantpits.training import records
+
+    real_builder = records.build_model_record_entry
+
+    def build_entry(**kwargs):
+        if kwargs["operation"] != "train":
+            return real_builder(**kwargs)
+        name, mode = records.split_model_key(kwargs["key"])
+        anchor = kwargs["requested_anchor"]
+        return records.ModelRecordEntry(
+            key=kwargs["key"], model_name=name, training_mode=mode,
+            operation="train", status="ready", recorder_id=kwargs["recorder"].info["id"],
+            experiment_name=kwargs["experiment_name"], requested_anchor=anchor,
+            prediction_start=anchor, prediction_end=anchor, prediction_rows=1,
+            dataset_test_end=anchor,
+        )
+
+    monkeypatch.setattr(records, "build_model_record_entry", build_entry)
+
 # ---------------------------------------------------------------------------
 # make_model_key / parse_model_key
 # ---------------------------------------------------------------------------
@@ -204,7 +232,7 @@ def test_inject_config_default_freq_day_label(mock_env_constants):
 # ---------------------------------------------------------------------------
 
 
-def test_train_single_model_fit_typeerror_fallback(mock_env_constants, tmp_path):
+def test_train_single_model_fit_typeerror_fallback(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 736-738: model.fit() raises TypeError → call without evals_result."""
     train_utils, _ = mock_env_constants
 
@@ -252,7 +280,7 @@ def test_train_single_model_fit_typeerror_fallback(mock_env_constants, tmp_path)
 # ---------------------------------------------------------------------------
 
 
-def test_train_evals_result_gbdt_structure(mock_env_constants, tmp_path):
+def test_train_evals_result_gbdt_structure(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 760-795: evals_result with GBDT dict-of-dict structure."""
     train_utils, _ = mock_env_constants
 
@@ -314,7 +342,7 @@ def test_train_evals_result_gbdt_structure(mock_env_constants, tmp_path):
     assert conv["best_epoch"] == 2
 
 
-def test_train_evals_result_nn_list_structure_minimizing(mock_env_constants, tmp_path):
+def test_train_evals_result_nn_list_structure_minimizing(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 780-795: NN evals_result with train/valid lists, minimizing model."""
     train_utils, _ = mock_env_constants
 
@@ -372,7 +400,7 @@ def test_train_evals_result_nn_list_structure_minimizing(mock_env_constants, tmp
     assert conv["best_epoch"] == 2
 
 
-def test_train_evals_result_nn_list_maximizing(mock_env_constants, tmp_path):
+def test_train_evals_result_nn_list_maximizing(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 780-795: NN evals_result, maximizing model ('return' in class name)."""
     train_utils, _ = mock_env_constants
 
@@ -428,7 +456,7 @@ def test_train_evals_result_nn_list_maximizing(mock_env_constants, tmp_path):
     assert conv["best_epoch"] == 0
 
 
-def test_train_lightgbm_fallback(mock_env_constants, tmp_path):
+def test_train_lightgbm_fallback(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 826-845: LightGBM model attribute fallback (model.best_iteration)."""
     train_utils, _ = mock_env_constants
 
@@ -484,7 +512,7 @@ def test_train_lightgbm_fallback(mock_env_constants, tmp_path):
     assert conv["early_stopped"] is True
 
 
-def test_train_lightgbm_best_score_valid_key(mock_env_constants, tmp_path):
+def test_train_lightgbm_best_score_valid_key(mock_env_constants, tmp_path, mock_training_output_entry):
     """Line 843: LightGBM best_score with 'valid' key (not 'valid_1')."""
     train_utils, _ = mock_env_constants
 
@@ -536,7 +564,7 @@ def test_train_lightgbm_best_score_valid_key(mock_env_constants, tmp_path):
     assert conv["best_score"] == 0.03
 
 
-def test_train_catboost_fallback(mock_env_constants, tmp_path):
+def test_train_catboost_fallback(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 812-823: CatBoost model attribute fallback (model.best_iteration_)."""
     train_utils, _ = mock_env_constants
 
@@ -591,7 +619,7 @@ def test_train_catboost_fallback(mock_env_constants, tmp_path):
     assert conv["early_stopped"] is True
 
 
-def test_train_gbdt_fitted_model_fallback(mock_env_constants, tmp_path):
+def test_train_gbdt_fitted_model_fallback(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 805-807: fitted_model_.best_iteration (generic GBDT)."""
     train_utils, _ = mock_env_constants
 
@@ -642,7 +670,7 @@ def test_train_gbdt_fitted_model_fallback(mock_env_constants, tmp_path):
     assert conv["best_epoch"] == 80
 
 
-def test_train_linear_model_branch(mock_env_constants, tmp_path):
+def test_train_linear_model_branch(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 848-851: 'linear' in model_name → all None for epochs."""
     train_utils, _ = mock_env_constants
 
@@ -692,7 +720,7 @@ def test_train_linear_model_branch(mock_env_constants, tmp_path):
     assert conv["best_score"] is None
 
 
-def test_train_convergence_extraction_exception(mock_env_constants, tmp_path):
+def test_train_convergence_extraction_exception(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 858-859: exception during convergence extraction is caught."""
     train_utils, _ = mock_env_constants
 
@@ -752,7 +780,7 @@ def test_train_convergence_extraction_exception(mock_env_constants, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_train_portfolio_analysis_single_index(mock_env_constants, tmp_path):
+def test_train_portfolio_analysis_single_index(mock_env_constants, tmp_path, mock_training_output_entry):
     """Line 933-936: port_analysis with single-level index (not MultiIndex)."""
     train_utils, _ = mock_env_constants
 
@@ -810,7 +838,7 @@ def test_train_portfolio_analysis_single_index(mock_env_constants, tmp_path):
     assert conv["Information_Ratio"] == 1.2
 
 
-def test_train_portfolio_analysis_multiindex(mock_env_constants, tmp_path):
+def test_train_portfolio_analysis_multiindex(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 924-932: port_analysis with MultiIndex DataFrame."""
     train_utils, _ = mock_env_constants
 
@@ -869,7 +897,7 @@ def test_train_portfolio_analysis_multiindex(mock_env_constants, tmp_path):
     assert conv["Information_Ratio"] == 0.9
 
 
-def test_train_portfolio_analysis_exception(mock_env_constants, tmp_path):
+def test_train_portfolio_analysis_exception(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 937-938: portfolio analysis raises exception → logged but not fatal."""
     train_utils, _ = mock_env_constants
 
@@ -1062,7 +1090,7 @@ def test_predict_single_model_not_in_source(mock_env_constants, tmp_path):
 
 def test_predict_single_model_fallback_chain(mock_env_constants, tmp_path):
     """Lines 1400-1407: model.pkl not found → trace back through source_record_id chain."""
-    train_utils, _ = mock_env_constants
+    train_utils, workspace = mock_env_constants
     yaml_file = tmp_path / "test_fallback.yaml"
     yaml_file.write_text("dummy")
     params = {"anchor_date": "2026-01-01"}
@@ -1076,22 +1104,42 @@ def test_predict_single_model_fallback_chain(mock_env_constants, tmp_path):
     }
     model = MagicMock()
 
-    # First recorder: load_object raises → fallback tags have source_record_id
+    # Only a confirmed missing artifact permits tracing the explicit parent.
     parent_recorder = MagicMock()
+    parent_recorder.list_artifacts.return_value = ["model.pkl"]
     parent_recorder.load_object.return_value = model
     parent_recorder.info = {"id": "parent_id"}
+    parent_recorder.list_tags.return_value = {"model": "M1"}
 
     child_recorder = MagicMock()
-    child_recorder.load_object.side_effect = [Exception("not found"), pd.Series([0.5])]
+    child_recorder.list_artifacts.return_value = ["pred.pkl"]
+    child_recorder.load_object.side_effect = AssertionError("a missing model must not be loaded")
     child_recorder.list_tags.return_value = {
         "source_record_id": "parent_id",
         "source_experiment": "ParentExp",
+        "model": "M1", "mode": "predict_only",
     }
     child_recorder.info = {"id": "child_id"}
 
-    with patch("qlib.utils.init_instance_by_config", side_effect=[model, MagicMock(), MagicMock()]):
+    index = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp(params["anchor_date"]), "SYNTH")],
+        names=["datetime", "instrument"],
+    )
+    prediction = pd.DataFrame({"score": [0.5]}, index=index)
+    output_recorder = MagicMock()
+    output_recorder.info = {"id": "prediction_id", "artifact_uri": (workspace / "output/prediction").as_uri()}
+    output_recorder.list_tags.return_value = {"model": "M1", "anchor_date": params["anchor_date"]}
+    output_recorder.load_object.side_effect = lambda name: (
+        prediction if name == "pred.pkl" else pd.Series([0.5])
+    )
+
+    with patch("qlib.utils.init_instance_by_config", side_effect=[MagicMock(), MagicMock()]):
         with patch("qlib.workflow.R") as mock_R:
-            mock_R.get_recorder.side_effect = [child_recorder, parent_recorder, child_recorder]
+            def get_recorder(*args, **kwargs):
+                if not kwargs:
+                    return output_recorder
+                return parent_recorder if kwargs.get("recorder_id") == "parent_id" else child_recorder
+            mock_R.get_recorder.side_effect = get_recorder
             mock_R.start.return_value.__enter__.return_value = mock_R
 
             with patch("quantpits.utils.train_utils.inject_config", return_value=task_config):
@@ -1100,8 +1148,14 @@ def test_predict_single_model_fallback_chain(mock_env_constants, tmp_path):
                         "M1", {"yaml_file": str(yaml_file)}, params, "E", source
                     )
     assert result["success"] is True
-    # Should have loaded model from parent recorder
-    assert parent_recorder.load_object.called
+    # Model fallback and independently traced root both survive an extra copy.
+    child_recorder.load_object.assert_not_called()
+    parent_recorder.load_object.assert_called_once_with("model.pkl")
+    assert result["record_entry"]["source_recorder_id"] == "I"
+    assert result["record_entry"]["prediction_end"] == params["anchor_date"]
+    assert mock_R.set_tags.call_args.kwargs["training_origin_record_id"] == "parent_id"
+    assert mock_R.set_tags.call_args.kwargs["training_origin_status"] == "VERIFIED"
+    assert mock_R.set_tags.call_args.kwargs["source_record_id"] == "I"
 
 
 def test_predict_single_model_max_depth_exceeded(mock_env_constants, tmp_path):
@@ -1117,7 +1171,8 @@ def test_predict_single_model_max_depth_exceeded(mock_env_constants, tmp_path):
 
     # Every recorder in chain fails and points to another
     recorder = MagicMock()
-    recorder.load_object.side_effect = Exception("not found")
+    recorder.list_artifacts.return_value = []
+    recorder.load_object.side_effect = AssertionError("a missing model must not be loaded")
     recorder.list_tags.return_value = {
         "source_record_id": "next_id",
         "source_experiment": "NextExp",
@@ -1135,11 +1190,12 @@ def test_predict_single_model_max_depth_exceeded(mock_env_constants, tmp_path):
                     )
     assert result["success"] is False
     assert "max traceback" in result["error"].lower()
+    recorder.load_object.assert_not_called()
 
 
 def test_predict_single_model_ic_error(mock_env_constants, tmp_path):
     """Lines 1465-1467: IC metric extraction fails → performance only has record_id."""
-    train_utils, _ = mock_env_constants
+    train_utils, workspace = mock_env_constants
     yaml_file = tmp_path / "test_pred_icerr.yaml"
     yaml_file.write_text("dummy")
     params = {"anchor_date": "2026-01-01"}
@@ -1148,13 +1204,28 @@ def test_predict_single_model_ic_error(mock_env_constants, tmp_path):
     task_config = {"task": {"dataset": {}, "record": []}}
     model = MagicMock()
 
+    source_recorder = MagicMock()
+    source_recorder.list_artifacts.return_value = ["model.pkl"]
+    source_recorder.load_object.return_value = model
+    source_recorder.list_tags.return_value = {"model": "M1", "mode": "train"}
     recorder = MagicMock()
-    recorder.load_object.side_effect = [model, Exception("IC not found")]
-    recorder.info = {"id": "pred_ic_err_id"}
+    recorder.info = {"id": "pred_ic_err_id", "artifact_uri": (workspace / "output/ic_error").as_uri()}
+    recorder.list_tags.return_value = {"model": "M1", "anchor_date": params["anchor_date"]}
+    index = pd.MultiIndex.from_tuples(
+        [(pd.Timestamp(params["anchor_date"]), "SYNTH")],
+        names=["datetime", "instrument"],
+    )
+    prediction = pd.DataFrame({"score": [0.5]}, index=index)
+    def load_output(name):
+        if name == "sig_analysis/ic.pkl":
+            raise FileNotFoundError("IC not found")
+        assert name == "pred.pkl"
+        return prediction
+    recorder.load_object.side_effect = load_output
 
-    with patch("qlib.utils.init_instance_by_config", side_effect=[model, MagicMock()]):
+    with patch("qlib.utils.init_instance_by_config", return_value=MagicMock()):
         with patch("qlib.workflow.R") as mock_R:
-            mock_R.get_recorder.return_value = recorder
+            mock_R.get_recorder.side_effect = lambda **kwargs: source_recorder if kwargs else recorder
             mock_R.start.return_value.__enter__.return_value = mock_R
 
             with patch("quantpits.utils.train_utils.inject_config", return_value=task_config):
@@ -1165,6 +1236,9 @@ def test_predict_single_model_ic_error(mock_env_constants, tmp_path):
     assert result["success"] is True
     assert result["performance"]["record_id"] == "pred_ic_err_id"
     assert "IC_Mean" not in result["performance"]
+    assert result["record_entry"]["prediction_end"] == params["anchor_date"]
+    assert result["record_entry"]["prediction_rows"] == 1
+    source_recorder.load_object.assert_called_once_with("model.pkl")
 
 
 def test_predict_single_model_top_level_exception(mock_env_constants, tmp_path):
@@ -1373,7 +1447,7 @@ def test_inject_config_no_pretrain_deletes_model_path(mock_env_constants):
         assert "model_path" not in config2["task"]["model"]["kwargs"]
 
 
-def test_train_evals_result_stop_iteration(mock_env_constants, tmp_path):
+def test_train_evals_result_stop_iteration(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 762-763: StopIteration when evals_result is truthy but has empty iterator.
 
     NOTE: Lines 762-763 are defensive dead code — a regular Python dict is
@@ -1421,7 +1495,7 @@ def test_train_evals_result_stop_iteration(mock_env_constants, tmp_path):
     assert result["success"] is True
 
 
-def test_train_catboost_best_score_exception(mock_env_constants, tmp_path):
+def test_train_catboost_best_score_exception(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 822-823: CatBoost best_score_ extraction raises exception."""
     train_utils, _ = mock_env_constants
 
@@ -1479,7 +1553,7 @@ def test_train_catboost_best_score_exception(mock_env_constants, tmp_path):
     assert conv["best_score"] is None  # best_score extraction failed silently
 
 
-def test_train_lgb_num_trees_fallback(mock_env_constants, tmp_path):
+def test_train_lgb_num_trees_fallback(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 829-832: LightGBM num_trees() fallback when current_iteration is absent."""
     train_utils, _ = mock_env_constants
 
@@ -1534,7 +1608,7 @@ def test_train_lgb_num_trees_fallback(mock_env_constants, tmp_path):
     assert conv["best_epoch"] == 120
 
 
-def test_train_lgb_num_trees_exception(mock_env_constants, tmp_path):
+def test_train_lgb_num_trees_exception(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 829-832: num_trees() itself raises an exception (bare except)."""
     train_utils, _ = mock_env_constants
 
@@ -1588,7 +1662,7 @@ def test_train_lgb_num_trees_exception(mock_env_constants, tmp_path):
     # actual_epochs stays None since num_trees failed
 
 
-def test_train_lgb_best_score_exception(mock_env_constants, tmp_path):
+def test_train_lgb_best_score_exception(mock_env_constants, tmp_path, mock_training_output_entry):
     """Lines 844-845: LightGBM best_score extraction raises exception."""
     train_utils, _ = mock_env_constants
 

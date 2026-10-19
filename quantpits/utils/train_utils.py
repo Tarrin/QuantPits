@@ -19,6 +19,8 @@ import json
 import yaml
 import shutil
 import time
+import math
+import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta
 from quantpits.utils.constants import TRADING_DAYS_PER_YEAR, TRADING_WEEKS_PER_YEAR, AVERAGE_CALENDAR_DAYS_PER_YEAR
@@ -34,6 +36,7 @@ import tempfile
 
 from quantpits.utils import env
 from quantpits.utils.workspace import fingerprint_value
+from quantpits.utils.model_artifacts import load_owned_model
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = env.ROOT_DIR
@@ -1461,7 +1464,18 @@ def train_single_model(model_name, yaml_file, params, experiment_name,
             
             # 预测
             print(f"[{model_name}] Predicting...")
-            pred = model.predict(dataset=dataset)
+            # MTSDatasetH materializes the training handler's _learn view,
+            # so its DropnaLabel also hides the newest inference-only rows.
+            # Keep fit data intact and rebuild only when prediction processors
+            # differ; normal datasets and MTS without DropnaLabel are reused.
+            prediction_dataset_cfg = _prepare_predict_only_dataset_config(dataset_cfg)
+            prediction_dataset = dataset
+            if prediction_dataset_cfg != dataset_cfg:
+                if cache_mgr is not None:
+                    prediction_dataset = cache_mgr.create_dataset(prediction_dataset_cfg)
+                else:
+                    prediction_dataset = init_instance_by_config(prediction_dataset_cfg)
+            pred = model.predict(dataset=prediction_dataset)
             
             # 保存模型对象（供 static_train.py --predict-only 加载）
             print(f"[{model_name}] Saving model to recorder...")
@@ -1478,7 +1492,7 @@ def train_single_model(model_name, yaml_file, params, experiment_name,
                 if r_cfg['kwargs'].get('model') == '<MODEL>':
                     r_cfg['kwargs']['model'] = model
                 if r_cfg['kwargs'].get('dataset') == '<DATASET>':
-                    r_cfg['kwargs']['dataset'] = dataset
+                    r_cfg['kwargs']['dataset'] = prediction_dataset
                 
                 r_obj = init_instance_by_config(r_cfg, recorder=recorder)
                 r_obj.generate()
@@ -1492,8 +1506,8 @@ def train_single_model(model_name, yaml_file, params, experiment_name,
                 ic_std = ic_series.std()
                 ic_ir = ic_mean / ic_std if ic_std != 0 else None
                 performance = {
-                    "IC_Mean": float(ic_mean) if ic_mean else None,
-                    "ICIR": float(ic_ir) if ic_ir else None,
+                    "IC_Mean": float(ic_mean) if pd.notna(ic_mean) else None,
+                    "ICIR": float(ic_ir) if pd.notna(ic_ir) else None,
                     "record_id": recorder.info['id']
                 }
 
@@ -1544,7 +1558,6 @@ def train_single_model(model_name, yaml_file, params, experiment_name,
             rid = recorder.info['id']
             print(f"[{model_name}] Finished! Recorder ID: {rid}")
             
-            result['success'] = True
             result['record_id'] = rid
             result['performance'] = performance
             from quantpits.training.records import build_model_record_entry
@@ -1557,8 +1570,14 @@ def train_single_model(model_name, yaml_file, params, experiment_name,
                 workspace_root=workspace_root or env.ROOT_DIR,
                 config_fingerprint=fingerprint_value(params),
             ).to_dict()
+
+        # Both persisted prediction validation and recorder context completion
+        # must succeed before this model can be reported as successful.
+        result['success'] = True
     
     except Exception as e:
+        result['success'] = False
+        result.pop('record_entry', None)
         result['error'] = str(e)
         print(f"!!! Error running {model_name}: {e}")
         import traceback
@@ -2027,8 +2046,8 @@ def predict_cpcv_model(model_name, model_info, params, experiment_name,
         if fold_count > 0:
             print(f"  Found {fold_count} fold models in recorder {current_id}")
             for fi in range(fold_count):
-                fm = source_recorder.load_object(
-                    f"model_fold_{fi}.pkl"
+                fm = load_owned_model(
+                    source_recorder, f"model_fold_{fi}.pkl"
                 )
                 _flatten_rnn_params(fm)
                 fold_models.append(fm)
@@ -2057,8 +2076,15 @@ def predict_cpcv_model(model_name, model_info, params, experiment_name,
         return result
 
     try:
+        from quantpits.training.model_identity import prediction_origin_tags
+        origin_tags = prediction_origin_tags(
+            source_exp, source_id,
+            lambda exp, rid: R.get_recorder(experiment_name=exp, recorder_id=rid).list_tags(),
+            model_name,
+        )
         with R.start(experiment_name=experiment_name):
             R.set_tags(model=model_name, anchor_date=params['anchor_date'],
+                        **origin_tags,
                         mode='cpcv_predict',
                         source_experiment=source_exp,
                         source_record_id=source_id)
@@ -2876,27 +2902,33 @@ def predict_single_model(model_name, model_info, params, experiment_name,
         # 1. 从源 recorder 加载模型
         print(f"[{model_name}] Loading model from source recorder...")
         
-        # 稳健加载：如果在当前 recorder 里没找到 model.pkl，则根据 source_record_id tag 向上溯源
+        # 仅在 artifact 清单确认 model.pkl 缺失时沿明确 parent tags 回溯。
+        # 加载／后端错误不能被当作缺失，也不能切换到另一份模型。
         current_id = source_record_id
         current_exp = source_experiment
         model = None
         for _ in range(10):
-            source_recorder = R.get_recorder(
-                recorder_id=current_id,
-                experiment_name=current_exp
-            )
             try:
-                model = source_recorder.load_object("model.pkl")
-                _flatten_rnn_params(model)
-                break
-            except Exception:
-                tags = source_recorder.list_tags()
-                if 'source_record_id' in tags and 'source_experiment' in tags:
-                    print(f"    [Fallback] model.pkl 不在 {current_id} 中，正在向上溯源到 {tags['source_record_id']}...")
-                    current_id = tags['source_record_id']
-                    current_exp = tags['source_experiment']
-                else:
-                    raise ValueError(f"model.pkl not found in {current_id} and no parent tags available.")
+                source_recorder = R.get_recorder(
+                    recorder_id=current_id,
+                    experiment_name=current_exp
+                )
+                if "model.pkl" in source_recorder.list_artifacts():
+                    model = load_owned_model(source_recorder, "model.pkl")
+                    _flatten_rnn_params(model)
+                    break
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Cannot load model.pkl from experiment={current_exp}, "
+                    f"recorder={current_id}: {type(exc).__name__}: {exc}"
+                ) from exc
+            tags = source_recorder.list_tags()
+            if 'source_record_id' in tags and 'source_experiment' in tags:
+                print(f"    [Fallback] model.pkl 不在 {current_id} 中，正在向上溯源到 {tags['source_record_id']}...")
+                current_id = tags['source_record_id']
+                current_exp = tags['source_experiment']
+            else:
+                raise ValueError(f"model.pkl not found in {current_id} and no parent tags available.")
                     
         if model is None:
             raise ValueError(f"Exceeded max traceback depth of 10 for {model_name}.")
@@ -2915,12 +2947,20 @@ def predict_single_model(model_name, model_info, params, experiment_name,
         else:
             dataset = init_instance_by_config(dataset_cfg)
 
+        # Preserve direct parent audit tags and independently traced training origin.
+        from quantpits.training.model_identity import prediction_origin_tags
+        origin_tags = prediction_origin_tags(
+            source_experiment, source_record_id,
+            lambda exp, rid: R.get_recorder(experiment_name=exp, recorder_id=rid).list_tags(),
+            model_name,
+        )
         # 3. 在新实验下创建 Recorder 并预测
         with R.start(experiment_name=experiment_name):
             R.set_tags(
                 model=model_name,
                 anchor_date=params['anchor_date'],
                 mode='predict_only',
+                **origin_tags,
                 source_experiment=source_experiment,
                 source_record_id=source_record_id,
             )
@@ -2955,8 +2995,8 @@ def predict_single_model(model_name, model_info, params, experiment_name,
                 ic_std = ic_series.std()
                 ic_ir = ic_mean / ic_std if ic_std != 0 else None
                 performance = {
-                    "IC_Mean": float(ic_mean) if ic_mean else None,
-                    "ICIR": float(ic_ir) if ic_ir else None,
+                    "IC_Mean": float(ic_mean) if pd.notna(ic_mean) else None,
+                    "ICIR": float(ic_ir) if pd.notna(ic_ir) else None,
                     "record_id": recorder.info['id'],
                 }
             except Exception as e:

@@ -20,7 +20,6 @@ import importlib
 from numbers import Integral
 import pandas as pd
 import numpy as np
-from quantpits.utils import env
 
 
 # ==============================================================================
@@ -33,7 +32,12 @@ def load_strategy_config(workspace_path=None):
     from quantpits.utils.config_loader import load_workspace_config
     
     # load_workspace_config 已经包含了对 strategy_config.yaml 的读取以及对 TopK/DropN 的 Promote
-    workspace_root = workspace_path if workspace_path is not None else env.ROOT_DIR
+    if workspace_path is None:
+        from quantpits.utils import env
+
+        workspace_root = env.ROOT_DIR
+    else:
+        workspace_root = workspace_path
     full_config = load_workspace_config(workspace_root)
     
     # 构造 strategy.py 所需的返回结构

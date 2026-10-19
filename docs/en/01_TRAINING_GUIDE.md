@@ -20,6 +20,12 @@ This complete contract currently applies to static/CPCV only. Rolling and CPCV-r
 their existing independent lifecycle. Their real mutating commands share only the workspace training
 execution lease and are not yet backed by State V3 or the publication coordinator.
 
+Model reuse after Qlib's artifact hardening checks the actual API signature: our own selected model
+artifacts use explicit `trusted=True`, older APIs retain their original call, and data artifacts keep
+default loading. Verify reload / predict-only from the saved source after the first fit. No model
+parameter change or historical retraining is required for this adaptation. See the
+[Predict-Only guide](05_PREDICT_ONLY_GUIDE.md) for dependency provenance and missing-model fallback.
+
 ### Training Record V2
 
 New records use `schema_version: 2`. `model_records` is the authoritative identity map: every
@@ -42,8 +48,21 @@ a read-only Qlib recorder runtime explicitly to `--workspace`; runtime initializ
 nor migrates a missing backend and does not write to the workspace. Full training publishes the
 current registry only when every selected model succeeds and produces a verified entry.
 
+For a custom backend, pass its actual URI with `--mlflow-uri`, for example
+`--mlflow-uri "sqlite:///$PWD/mlflow.db"` from the target workspace. SQLite model and prediction
+artifacts may also reside in `mlruns/`; that directory alone does not identify the metadata backend.
+Training reactivation of the same resolved workspace preserves the selected `MLFLOW_TRACKING_URI`;
+switching to another workspace still resolves its backend afresh.
+
 A producer should publish `ready` only after validating the output recorder and persisted
 `pred.pkl`. Failed or skipped operations must not replace an existing current pointer.
+
+In static TRA training, `MTSDatasetH` builds prediction samples from learning data. Training retains `DropnaLabel`;
+after fitting, prediction and `SignalRecord` use a separate prediction dataset with only that
+processor removed, so the latest dates can produce signals without realized labels. Other learning
+and inference processors and model parameters retain their configured values. Unknown labels stay
+missing. Regular `DatasetH` and `TSDatasetH` reuse their original dataset, and coverage checks still
+inspect the persisted `pred.pkl`.
 
 V2 uses strict version dispatch. Once `schema_version: 2` is declared, matching `models` and
 `model_records` mappings are mandatory; readers never fall back to top-level V1 fields. A `ready`

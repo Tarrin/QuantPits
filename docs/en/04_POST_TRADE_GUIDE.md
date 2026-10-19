@@ -1,5 +1,9 @@
 # Post-Trade Batch Processing Guide
 
+GTJA settlement parsing retains known cash adjustments, including `利息归本`, even without a stock code. Such rows keep an empty code in settlement logs and affect cash only; they do not create stock positions.
+
+Order/trade/settlement quantity reconciliation recognizes the GTJA order label `对方买入` as buy and `对方卖出`, `本方卖出`, and `全额卖出` as sell. These labels describe execution modes and retain their buy/sell direction. Reconciliation uses actual filled quantities, excludes zero-fill cancellations, and still rejects quantity mismatches or unknown filled execution directions.
+
 ## Overview
 
 The unified post-trade command handles three complementary broker evidence streams: settlement, orders, and intraday fills. Its default `--scope all` updates account state and preserves the raw evidence required by execution analytics.
@@ -312,6 +316,8 @@ Optional Overrides:
 > Real state execution currently uses a recoverable cursor-last protocol:
 > derived CSV files are atomically replaced one file at a time and
 ### Recoverable transaction and run audit
+
+Strict preflight, dry-run output and RunManifest describe each settlement day for both daily and bundle sources, including status, row count and source fingerprints. `assumed_empty` is an explicitly acknowledged logical empty day with zero rows. A daily empty day has a null `source_path` and no consumed settlement InputRef; a bundle empty day still identifies the actual interval file and its fingerprint. Unparsed row counts in light plans are null, not zero. `settlement_source_count` counts physical sources and `settlement_logical_day_count` counts logical dates, including empty days.
 
 Account state uses a workspace-local transaction journal. Exact target bytes are staged under `data/.post_trade_transactions/<run_id>/staged/` before any target is replaced. Every artifact records baseline and target SHA-256 values. Recovery accepts only the baseline or target version; a third version becomes `conflicted` and is never overwritten. `cashflow.json` follows derived logs, and `prod_config.json` is always the final required target.
 

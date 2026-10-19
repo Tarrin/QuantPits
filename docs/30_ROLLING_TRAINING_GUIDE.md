@@ -23,6 +23,12 @@
 > lease，避免并发覆盖 current record。`--show-state` 与 `--dry-run` 不获取该 lease。Phase 34 已新增独立的
 > exact-unit execution/evidence kernel，但没有把现有 CLI 自动切换过去；publication/current-record/closure
 > 仍属后续边界。
+
+Rolling 的模型 reload 已适配 Qlib artifact 加固更新：自己的明确模型制品使用显式
+`trusted=True`，较旧 API 保持原调用，pred／report 等数据仍默认读取。CPCV 预测与截断修复
+要求所需 fold 全部加载成功；加载错误不会被当作 fold 列表结束，也不会用部分 fold 覆盖预测。
+运行依赖来源及升级后的验证顺序见 [Predict-Only 指南](05_PREDICT_ONLY_GUIDE.md)。
+
 > `--dry-run` 是严格的文件系统 Prepared Plan：显示配置、输入指纹、动作、ordered targets、state
 > 分类与预期副作用，但不初始化 Qlib、不计算实际 window/fold 日期，也不创建 OperatorLog、state、
 > manifest 或 lock；精确窗口在真实执行中解析。
@@ -206,6 +212,11 @@ recovery provenance，调用方不能通过 public constructor 拼装可复用�
 identity mismatch、缺 artifact、corrupt、coverage short、不可比较、orphan 或观察漂移都不能成为 `valid`。
 `classify_rolling_recovery(requests, evidence_set)` 只生成保持 requested identity/order/cardinality 的 proposal；仅
 `valid` unit 可进入 reusable subset，proposal 没有 execute、state transition、publication、repair 或 `apply()` 能力。
+
+模型能力探针会监测整个仓库的写入（排除 `.git`、`plan`、`workspaces`）。检测到写入时，错误会
+列出元数据发生变化的路径；只有写入事件而最终元数据相同时也仍失败。此观察不能确定写入者，
+其他 Agent 或验证进程的并发写入也会触发，因此应在受保护目录没有并发变动时运行这类验证。
+
 Phase 34 的权威入口 `build_rolling_execution_scope(prepared, resolved, selected_window_keys, targets, windows)`
 会重验 Prepared target tuple、匹配的 Resolved Plan，以及 resolved windows 的显式有序子集；unknown、duplicate、
 out-of-order selection 均拒绝。内部 `bind_rolling_execution_run_identity(resolved, selected_window_keys, windows)`

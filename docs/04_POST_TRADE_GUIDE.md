@@ -1,5 +1,9 @@
 # Post-Trade 批量处理使用指南
 
+国泰君安交割中的已知现金调整类别（含“利息归本”）即使证券代码为空也会保留。无证券现金行在交割流水中保留空代码，只改变现金，不创建股票持仓。
+
+委托/成交/交割数量对账支持国泰君安委托标签：“对方买入”按买入核对，“对方卖出”“本方卖出”和“全额卖出”按卖出核对。这些标签表示委托执行方式，不反转买卖方向；对账使用实际成交数量，零成交撤单不计入，数量不匹配或未知成交方向仍报错。
+
 ## 概览
 
 Post-Trade 命令统一处理三类互补的券商证据：交割单、委托和逐笔成交。默认 `--scope all`，既更新现金/持仓，也维护执行分析所需的原始委托/成交日志。
@@ -303,6 +307,8 @@ python quantpits/scripts/prod_post_trade.py --help
 
 > [!WARNING]
 ### 可恢复事务与运行审计
+
+daily 和 bundle 的严格预检、dry-run 输出及 RunManifest 都记录逐日 settlement 状态、行数和来源指纹。`assumed_empty` 表示显式确认的逻辑空日，行数为 0；daily 空日的 `source_path` 为 null，不生成已消费交割文件的 InputRef。bundle 空日仍关联实际区间文件及其指纹。轻量计划尚未解析的行数为 null，不代表零行。`settlement_source_count` 统计物理来源，`settlement_logical_day_count` 统计逻辑日期；空日仍计入日期范围。
 
 账户状态使用 workspace-local transaction journal：所有目标 bytes 先写入 `data/.post_trade_transactions/<run_id>/staged/`，journal 持久化后才替换目标。每个 artifact 都记录 baseline/target SHA-256；恢复只接受当前内容等于 baseline 或 target，第三版本会进入 `conflicted`，不会覆盖人工修改。`cashflow.json` 在派生日志之后提交，`prod_config.json` 始终最后提交。
 

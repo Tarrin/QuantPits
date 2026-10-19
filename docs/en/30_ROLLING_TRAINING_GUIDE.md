@@ -26,6 +26,13 @@
 > current-record replacement. `--show-state` and `--dry-run` do not acquire that lease. Phase 34
 > adds a standalone exact-unit execution/evidence kernel without switching the existing CLI to it;
 > publication, current-record replacement, and closure remain later boundaries.
+
+Rolling model reload supports Qlib's artifact hardening: our own selected model artifacts use explicit
+`trusted=True`, older APIs retain their original call, and prediction/report data keep default loading.
+CPCV prediction and truncation repair require every required fold to load. A loading error is not an
+end-of-fold marker and never causes prediction replacement using only a subset. See the
+[Predict-Only guide](05_PREDICT_ONLY_GUIDE.md) for runtime provenance and post-upgrade validation.
+
 > `--dry-run` is a strict filesystem-only Prepared Plan: it renders configuration and input
 > fingerprints, the action, ordered targets, state classification, and expected effects without
 > initializing Qlib, resolving exact window/fold dates, or creating OperatorLog, state, manifest, or
@@ -226,7 +233,14 @@ candidates, identity mismatch, missing/corrupt artifacts, short coverage, non-co
 orphans, or drift cannot become `valid`. `classify_rolling_recovery(requests, evidence_set)` emits
 only a proposal that preserves requested identity, order, and cardinality; only `valid` units enter
 its reusable subset, and it has no execute, state-transition, publication, repair, or `apply()`
-capability. Phase 34's authoritative
+capability.
+
+Model-capability probes monitor repository writes, excluding `.git`, `plan`, and `workspaces`.
+Errors list paths with changed metadata; write events still fail when final metadata matches.
+This observation does not identify the writer. Concurrent writes by another agent or verification
+process can also trigger it, so run these checks while the protected directories are stable.
+
+Phase 34's authoritative
 `build_rolling_execution_scope(prepared, resolved, selected_window_keys, targets, windows)` revalidates
 the Prepared target tuple, the matching Resolved Plan, and an explicit ordered subset of resolved
 windows; unknown, duplicate, and out-of-order selections are rejected. Internally,
