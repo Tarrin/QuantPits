@@ -174,9 +174,7 @@ class OperatorLog:
             f.flush()
             os.fsync(f.fileno())
         if not existed:
-            directory_fd = os.open(parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            from quantpits.utils.durability import fsync_directory
+
+            fsync_directory(parent)
         return self._entry_fingerprint(entry)

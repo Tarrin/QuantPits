@@ -7,11 +7,7 @@ import os
 from pathlib import Path
 
 from quantpits.training.errors import TrainingLeaseError
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - production is Linux
-    fcntl = None
+from quantpits.utils.durability import flock_compat as fcntl
 
 
 class TrainingExecutionLease:

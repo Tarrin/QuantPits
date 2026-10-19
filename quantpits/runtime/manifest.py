@@ -18,6 +18,7 @@ from quantpits.runtime.command import (
     to_public_value,
 )
 from quantpits.utils.workspace import WorkspaceContext
+from quantpits.utils.durability import fsync_directory
 
 
 class RunManifestConflictError(RuntimeError):
@@ -111,11 +112,7 @@ def write_run_manifest(ctx: WorkspaceContext, manifest: RunManifest) -> Path:
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp_path, path)
-    directory_fd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    fsync_directory(path.parent)
     return path
 
 
@@ -212,9 +209,5 @@ def write_or_adopt_run_manifest(
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(tmp_path, path)
-    directory_fd = os.open(str(path.parent), os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
+    fsync_directory(path.parent)
     return path, fingerprint

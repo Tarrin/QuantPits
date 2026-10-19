@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
+from quantpits.utils.durability import fsync_directory
+
 
 @dataclass(frozen=True)
 class FileBaseline:
@@ -58,14 +60,6 @@ def baseline_matches(path: Path, baseline: FileBaseline) -> bool:
         and observed.fingerprint == baseline.fingerprint
         and observed.size_bytes == baseline.size_bytes
     )
-
-
-def fsync_directory(path: Path) -> None:
-    descriptor = os.open(str(path), os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def atomic_write_bytes(path: Path, payload: bytes) -> None:

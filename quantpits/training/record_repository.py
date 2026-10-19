@@ -14,11 +14,7 @@ from typing import Callable, Iterable, Mapping, Optional
 
 from .records import ModelRecordOutcome, TrainingRecordSnapshot, snapshot_from_dict
 from .persistence import read_with_baseline
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover - Windows compatibility
-    fcntl = None
+from quantpits.utils.durability import flock_compat as fcntl, fsync_directory
 
 
 class TrainingRecordConflictError(RuntimeError):
@@ -139,13 +135,11 @@ class TrainingRecordRepository:
             yield
             return
         with lock_path.open("a+") as handle:
-            if fcntl is not None:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             try:
                 yield
             finally:
-                if fcntl is not None:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def lock(self, *, shared=False, create=True):
         """Return the canonical lock for every current-record reader/writer.
@@ -229,8 +223,6 @@ class TrainingRecordRepository:
             if _fingerprint(self.path) != baseline:
                 raise TrainingRecordConflictError("training record changed before replace")
             os.replace(name, str(self.path))
-            directory_fd = os.open(str(self.path.parent), os.O_RDONLY)
-            try: os.fsync(directory_fd)
-            finally: os.close(directory_fd)
+            fsync_directory(self.path.parent)
         finally:
             if os.path.exists(name): os.unlink(name)

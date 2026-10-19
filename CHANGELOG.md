@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Real training commands and run manifests now work on Windows: the workspace execution lease uses `msvcrt` byte-range locking when `fcntl` is unavailable, and POSIX-only directory fsync calls are skipped on Windows instead of failing with Errno 13.
+
 ### Added
 
 - Phased order generation (`--phase all|sell|buy`) with a validated read-only account snapshot for buy-only runs, so sells can settle before replacement buys are planned.
