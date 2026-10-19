@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -31,6 +33,9 @@ class OrderPlanError(ValueError):
     """Raised when an order command plan cannot be prepared safely."""
 
 
+OrderPhase = Literal["all", "sell", "buy"]
+
+
 @dataclass(frozen=True)
 class OrderRunOptions:
     model: str | None = None
@@ -43,6 +48,8 @@ class OrderRunOptions:
     json_plan: bool = False
     run_id: str | None = None
     no_manifest: bool = False
+    phase: OrderPhase = "all"
+    account_snapshot: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,8 @@ class OrderRunConfig:
     ensemble_config: dict
     ensemble_records: dict
     train_records: dict
+    account_snapshot_path: str | None = None
+    account_snapshot_as_of: Any = None
 
 
 @dataclass(frozen=True)
@@ -106,6 +115,7 @@ class OrderRunSummary:
     forced_exit_count: int = 0
     forced_exit_pending_count: int = 0
     normal_sell_count: int = 0
+    phase: OrderPhase = "all"
 
 
 @dataclass(frozen=True)
@@ -161,12 +171,28 @@ def build_order_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json-plan", action="store_true", help="以 JSON 输出执行计划；隐含 explain-plan")
     parser.add_argument("--run-id", type=str, default=None, help="显式指定运行 ID，用于计划身份")
     parser.add_argument("--no-manifest", action="store_true", help="执行订单生成但不写 RunManifest")
+    parser.add_argument(
+        "--phase",
+        choices=("all", "sell", "buy"),
+        default="all",
+        help="订单阶段：all 同时生成买卖；sell 只生成卖单；buy 只生成买单 (默认 all)",
+    )
+    parser.add_argument(
+        "--account-snapshot",
+        type=str,
+        default=None,
+        help="buy 阶段使用的盘后/盘中账户 JSON 快照（只读，不推进 Post-Trade 状态）",
+    )
     return parser
 
 
 def options_from_namespace(args: argparse.Namespace) -> OrderRunOptions:
     defaults = OrderRunOptions()
     values = {item.name: getattr(args, item.name, getattr(defaults, item.name)) for item in fields(OrderRunOptions)}
+    if values["phase"] not in ("all", "sell", "buy"):
+        raise OrderPlanError("phase must be one of: all, sell, buy")
+    if values["account_snapshot"] is not None and values["phase"] != "buy":
+        raise OrderPlanError("--account-snapshot is valid only with --phase buy")
     return OrderRunOptions(**values)
 
 
@@ -190,6 +216,80 @@ def _display_path(ctx: WorkspaceContext, path: Path) -> str:
         return path.resolve().as_posix()
 
 
+def _resolve_account_snapshot_path(ctx: WorkspaceContext, value: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise OrderPlanError("--account-snapshot must be a non-empty path")
+    candidate = Path(value).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    resolved = ctx.path(candidate.as_posix()).resolve()
+    try:
+        resolved.relative_to(ctx.root.resolve())
+    except ValueError as exc:
+        raise OrderPlanError("relative --account-snapshot must stay inside the workspace") from exc
+    return resolved
+
+
+def _is_finite_non_negative_number(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(numeric) and numeric >= 0
+
+
+def _load_account_snapshot(ctx: WorkspaceContext, value: str) -> tuple[Path, dict]:
+    path = _resolve_account_snapshot_path(ctx, value)
+    if not path.is_file():
+        raise OrderPlanError(f"account snapshot does not exist or is not a file: {_display_path(ctx, path)}")
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            snapshot = json.load(handle)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise OrderPlanError(f"could not read account snapshot {_display_path(ctx, path)}: {exc}") from exc
+    if not isinstance(snapshot, dict):
+        raise OrderPlanError("account snapshot must be a JSON object")
+    if "current_cash" not in snapshot or not _is_finite_non_negative_number(snapshot["current_cash"]):
+        raise OrderPlanError("account snapshot current_cash must be finite non-negative numeric")
+    if "current_holding" not in snapshot or not isinstance(snapshot["current_holding"], list):
+        raise OrderPlanError("account snapshot current_holding must be a list")
+
+    seen: set[str] = set()
+    for index, holding in enumerate(snapshot["current_holding"]):
+        if not isinstance(holding, dict):
+            raise OrderPlanError(f"account snapshot current_holding[{index}] must be an object")
+        instrument = holding.get("instrument")
+        if not isinstance(instrument, str) or not instrument.strip() or instrument != instrument.strip():
+            raise OrderPlanError(
+                f"account snapshot current_holding[{index}].instrument must be a non-empty string"
+            )
+        if instrument in seen:
+            raise OrderPlanError(f"account snapshot current_holding contains duplicate instrument: {instrument}")
+        seen.add(instrument)
+        for field in ("value", "amount"):
+            if field in holding and not _is_finite_non_negative_number(holding[field]):
+                raise OrderPlanError(
+                    f"account snapshot current_holding[{index}].{field} must be finite non-negative numeric"
+                )
+
+    if "current_full_cash" in snapshot and not _is_finite_non_negative_number(snapshot["current_full_cash"]):
+        raise OrderPlanError("account snapshot current_full_cash must be finite non-negative numeric")
+    if "as_of" in snapshot and snapshot["as_of"] is not None:
+        as_of = snapshot["as_of"]
+        if isinstance(as_of, bool) or not isinstance(as_of, (str, int, float)):
+            raise OrderPlanError("account snapshot as_of must be a scalar metadata value")
+        if isinstance(as_of, float) and not math.isfinite(as_of):
+            raise OrderPlanError("account snapshot as_of must be finite when numeric")
+    return path, snapshot
+
+
+def _validate_account_snapshot_phase(options: OrderRunOptions) -> None:
+    if options.account_snapshot is not None and options.phase != "buy":
+        raise OrderPlanError("--account-snapshot is valid only with --phase buy")
+
+
 def _resolve_record_path(ctx: WorkspaceContext, record_file: str | None) -> Path:
     path = _workspace_path(ctx, record_file, "latest_train_records.json")
     if not path.exists() and record_file is None:
@@ -209,6 +309,7 @@ def load_order_run_config(
 ) -> OrderRunConfig:
     """Load config-only order inputs without initializing Qlib or writing files."""
 
+    _validate_account_snapshot_phase(options)
     if merged_config is None:
         merged_config = load_workspace_config(ctx.root)
     if strategy_config is None:
@@ -217,6 +318,18 @@ def load_order_run_config(
         strategy_config = strategy.load_strategy_config(ctx.root)
     if cashflow_config is None:
         cashflow_config = _read_json(ctx.config_path("cashflow.json"))
+
+    account_snapshot_path = None
+    account_snapshot_as_of = None
+    if options.account_snapshot is not None:
+        account_snapshot_path_obj, account_snapshot = _load_account_snapshot(ctx, options.account_snapshot)
+        merged_config = copy.deepcopy(merged_config)
+        for field in ("current_cash", "current_holding"):
+            merged_config[field] = copy.deepcopy(account_snapshot[field])
+        if "current_full_cash" in account_snapshot:
+            merged_config["current_full_cash"] = copy.deepcopy(account_snapshot["current_full_cash"])
+        account_snapshot_path = _display_path(ctx, account_snapshot_path_obj)
+        account_snapshot_as_of = account_snapshot.get("as_of")
 
     record_path = _resolve_record_path(ctx, options.record_file)
 
@@ -227,6 +340,8 @@ def load_order_run_config(
         ensemble_config=_read_json(ctx.config_path("ensemble_config.json")),
         ensemble_records=_read_json(ctx.config_path("ensemble_records.json")),
         train_records=_read_json(record_path),
+        account_snapshot_path=account_snapshot_path,
+        account_snapshot_as_of=account_snapshot_as_of,
     )
 
 
@@ -329,15 +444,18 @@ def _file_ref(ctx: WorkspaceContext, path: Path, *, kind: str, description: str,
 def _preview_outputs(options: OrderRunOptions) -> tuple[str, ...]:
     base = options.output_dir.rstrip("/") or "."
     source = options.model or "ensemble"
-    return (
+    outputs = [
         f"{base}/model_opinions_<next_trade_date>.csv",
         f"{base}/model_opinions_<next_trade_date>.json",
-        f"{base}/sell_suggestion_{source}_<next_trade_date>.csv",
-        f"{base}/buy_suggestion_{source}_<next_trade_date>.csv",
-    )
+    ]
+    if options.phase in ("all", "sell"):
+        outputs.append(f"{base}/sell_suggestion_{source}_<next_trade_date>.csv")
+    if options.phase in ("all", "buy"):
+        outputs.append(f"{base}/buy_suggestion_{source}_<next_trade_date>.csv")
+    return tuple(outputs)
 
 
-def _steps(dry_run: bool, no_manifest: bool) -> tuple[CommandStep, ...]:
+def _steps(dry_run: bool, no_manifest: bool, phase: OrderPhase = "all") -> tuple[CommandStep, ...]:
     names = (
         ("validate-configs", "validate workspace configuration contracts", False),
         ("resolve-prediction-source", "resolve the model or ensemble recorder", False),
@@ -350,7 +468,14 @@ def _steps(dry_run: bool, no_manifest: bool) -> tuple[CommandStep, ...]:
         ("generate-sell-orders", "generate sell suggestions", False),
         ("generate-buy-orders", "generate buy suggestions", False),
     )
-    steps = [CommandStep(name, desc, expensive=expensive) for name, desc, expensive in names]
+    steps = []
+    for name, desc, expensive in names:
+        if name == "generate-sell-orders" and phase == "buy":
+            steps.append(CommandStep(name, desc, expensive=expensive, can_skip=True, skip_reason="--phase buy"))
+        elif name == "generate-buy-orders" and phase == "sell":
+            steps.append(CommandStep(name, desc, expensive=expensive, can_skip=True, skip_reason="--phase sell"))
+        else:
+            steps.append(CommandStep(name, desc, expensive=expensive))
     reason = "--dry-run" if dry_run else ""
     steps.extend(
         [
@@ -382,6 +507,7 @@ def build_order_command_plan(
     source: ResolvedOrderSource,
     validation_result: WorkspaceValidationResult | None,
 ) -> CommandPlan:
+    _validate_account_snapshot_phase(options)
     run_id = options.run_id or generate_run_id("order_gen")
     refs = list(input_refs_from_validation(validation_result)) if validation_result else []
     record_path = _resolve_record_path(ctx, options.record_file)
@@ -392,6 +518,19 @@ def build_order_command_plan(
             _file_ref(ctx, ctx.config_path("ensemble_records.json"), kind="record", description="ensemble recorder mapping"),
         ]
     )
+    account_snapshot = None
+    account_snapshot_path = None
+    if options.account_snapshot is not None:
+        account_snapshot_path, account_snapshot = _load_account_snapshot(ctx, options.account_snapshot)
+        refs.append(
+            _file_ref(
+                ctx,
+                account_snapshot_path,
+                kind="state",
+                description="read-only account snapshot",
+                required=True,
+            )
+        )
 
     preview = _preview_outputs(options)
     outputs = () if options.dry_run else tuple(OutputRef(path, kind="report", overwrite=True) for path in preview)
@@ -414,6 +553,7 @@ def build_order_command_plan(
     }
     warnings = source.warnings + _validation_warnings(validation_result)
     metadata = {
+        "phase": options.phase,
         "source_mode": source.mode,
         "requested_model": options.model,
         "requested_combo": options.combo,
@@ -435,6 +575,11 @@ def build_order_command_plan(
         "pending_cashflow_date_count": len(cashflows) if isinstance(cashflows, dict) else 0,
         "preview_output_paths": list(preview),
     }
+    if account_snapshot_path is not None and account_snapshot is not None:
+        metadata["account_snapshot_path"] = _display_path(ctx, account_snapshot_path)
+        metadata["account_snapshot_holding_count"] = len(account_snapshot["current_holding"])
+        if "as_of" in account_snapshot:
+            metadata["account_snapshot_as_of"] = account_snapshot["as_of"]
     return CommandPlan(
         command="order_gen",
         workspace=ctx.root.as_posix(),
@@ -452,7 +597,7 @@ def build_order_command_plan(
         ) if params.get("sell_out_of_universe", True) else ()) + (() if options.dry_run else (
             StateRef("data/operator_log.jsonl", action="write", description="operator execution log"),
         )),
-        steps=_steps(options.dry_run, options.no_manifest),
+        steps=_steps(options.dry_run, options.no_manifest, options.phase),
         config_fingerprints=fingerprints,
         warnings=warnings,
         metadata=metadata,

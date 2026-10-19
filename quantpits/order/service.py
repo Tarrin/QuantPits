@@ -57,6 +57,7 @@ def _manifest_self_ref(prepared: PreparedOrderRun) -> OutputRef:
 
 def _records(prepared: PreparedOrderRun, calculation: OrderCalculationResult, ledger: OrderArtifactLedger) -> dict:
     records = {
+        "phase": prepared.execution_options.phase,
         "anchor_date": calculation.anchor_date,
         "trade_date": calculation.trade_date,
         "source": {
@@ -107,6 +108,9 @@ class OrderGenerationService:
         import pandas as pd
 
         options = prepared.execution_options
+        phase = options.phase
+        if phase not in ("all", "sell", "buy"):
+            raise OrderExecutionError("phase must be one of: all, sell, buy")
         config = prepared.config.merged_config
         print(f"\n{'#' * 60}\n# Order Generation — 订单生成\n{'#' * 60}")
         self.hooks.init_qlib()
@@ -122,6 +126,7 @@ class OrderGenerationService:
         current_holding = config.get("current_holding", [])
         current_cash = float(config.get("current_cash", 0))
         print("\nStage 0: 配置加载")
+        print(f"订单阶段   : {phase}")
         print(f"当前持仓   : {len(current_holding)} 个")
 
         loaded: LoadedOrderPrediction = self.hooks.load_predictions(prepared.source)
@@ -183,10 +188,31 @@ class OrderGenerationService:
         if set(analysis.buy_candidates.index) & holding_set:
             raise OrderExecutionError("buy candidates contain current holdings")
         hold = analysis.ranked_continuing_holdings
+        sorted_frame = analysis.sorted_ranking
         sell_candidates = pd.concat([analysis.forced_exit_candidates, analysis.normal_sell_candidates])
         buy_candidates = analysis.buy_candidates
-        sorted_frame = analysis.sorted_ranking
         target_buy_count = analysis.target_buy_count
+        remaining_after_sell = analysis.remaining_after_sell
+        planned_final_holding_count = analysis.planned_final_holding_count
+
+        if phase == "sell":
+            # A sell-only run must not plan hypothetical replacement buys.  Keep
+            # the normal analysis for its sell classifications and report the
+            # account count after executable sells.
+            buy_candidates = analysis.buy_candidates.iloc[0:0]
+            target_buy_count = 0
+            planned_final_holding_count = remaining_after_sell
+        elif phase == "buy":
+            # A buy-only run is intentionally independent of any sell proceeds:
+            # account holdings (including unscored or out-of-universe holdings)
+            # occupy slots until a later post-trade run observes their removal.
+            target_buy_count = max(top_k - len(current_holding), 0)
+            buy_candidates = sorted_frame[~sorted_frame.index.isin(holding_set)].head(
+                target_buy_count * factor
+            )
+            sell_candidates = analysis.forced_exit_candidates.iloc[0:0]
+            remaining_after_sell = len(current_holding)
+            planned_final_holding_count = remaining_after_sell + target_buy_count
         print("\nStage 3: 排序与持仓分析")
         print(f"继续持有   : {len(hold)} 个")
         print(f"计划卖出   : {len(sell_candidates)} 个")
@@ -224,26 +250,38 @@ class OrderGenerationService:
         if opinions is not None:
             for warning in opinions.warnings:
                 print(f"⚠️  Opinion source warning: {warning}")
-        sell_orders, sell_amount = generator.generate_sell_orders(sell_candidates, current_holding, trade_date)
-        generated_sell_ids = {item["instrument"] for item in sell_orders}
-        expected_sell_ids = set(analysis.forced_exit_candidates.index) | set(analysis.normal_sell_candidates.index)
-        if generated_sell_ids != expected_sell_ids or len(generated_sell_ids) != len(sell_orders):
-            raise OrderExecutionError("generated sell orders do not match executable sell classifications")
-        sell_decisions = tuple(
-            {"instrument": instrument, "reason": "UNIVERSE_EXIT", "status": "ORDER_GENERATED"}
-            for instrument in analysis.forced_exit_candidates.index
-        ) + tuple(
-            {"instrument": instrument, "reason": "UNIVERSE_EXIT_PENDING_PRICE", "status": "PENDING"}
-            for instrument in analysis.pending_forced_exit_instruments
-        ) + tuple(
-            {"instrument": instrument, "reason": "RANK_DROPOUT", "status": "ORDER_GENERATED"}
-            for instrument in analysis.normal_sell_candidates.index
-        ) + tuple(
-            {"instrument": instrument, "reason": "ELIGIBLE_UNSCORED_RETAINED", "status": "RETAINED"}
-            for instrument in analysis.eligible_unscored_instruments
+        if phase == "buy":
+            # Do not call the sell generator in buy phase.  In particular, do
+            # not turn estimated sale proceeds into spendable cash.
+            sell_orders = []
+            sell_amount = 0.0
+            sell_decisions = ()
+        else:
+            sell_orders, sell_amount = generator.generate_sell_orders(sell_candidates, current_holding, trade_date)
+            generated_sell_ids = {item["instrument"] for item in sell_orders}
+            expected_sell_ids = set(analysis.forced_exit_candidates.index) | set(analysis.normal_sell_candidates.index)
+            if generated_sell_ids != expected_sell_ids or len(generated_sell_ids) != len(sell_orders):
+                raise OrderExecutionError("generated sell orders do not match executable sell classifications")
+            sell_decisions = tuple(
+                {"instrument": instrument, "reason": "UNIVERSE_EXIT", "status": "ORDER_GENERATED"}
+                for instrument in analysis.forced_exit_candidates.index
+            ) + tuple(
+                {"instrument": instrument, "reason": "UNIVERSE_EXIT_PENDING_PRICE", "status": "PENDING"}
+                for instrument in analysis.pending_forced_exit_instruments
+            ) + tuple(
+                {"instrument": instrument, "reason": "RANK_DROPOUT", "status": "ORDER_GENERATED"}
+                for instrument in analysis.normal_sell_candidates.index
+            ) + tuple(
+                {"instrument": instrument, "reason": "ELIGIBLE_UNSCORED_RETAINED", "status": "RETAINED"}
+                for instrument in analysis.eligible_unscored_instruments
+            )
+        cash = current_cash + (float(sell_amount) if phase == "all" else 0.0) + _cashflow_today(
+            prepared.config.cashflow_config, anchor_date
         )
-        cash = current_cash + float(sell_amount) + _cashflow_today(prepared.config.cashflow_config, anchor_date)
-        buy_orders = generator.generate_buy_orders(buy_candidates, target_buy_count, cash, trade_date)
+        if phase == "sell":
+            buy_orders = []
+        else:
+            buy_orders = generator.generate_buy_orders(buy_candidates, target_buy_count, cash, trade_date)
         sell_tuple = tuple(dict(item) for item in sell_orders)
         buy_tuple = tuple(dict(item) for item in buy_orders)
         buy_min, buy_max = _estimated_buy_range(buy_tuple, target_buy_count)
@@ -279,12 +317,14 @@ class OrderGenerationService:
             eligible_unscored_holding_count=(
                 len(analysis.eligible_unscored_instruments) if universe is not None else None
             ),
-            forced_exit_count=analysis.forced_exit_count,
-            forced_exit_pending_count=len(analysis.pending_forced_exit_instruments),
-            normal_sell_count=analysis.normal_sell_count,
-            executable_sell_count=analysis.executable_sell_count,
-            remaining_after_sell=analysis.remaining_after_sell,
-            planned_final_holding_count=analysis.planned_final_holding_count,
+            forced_exit_count=analysis.forced_exit_count if phase != "buy" else 0,
+            forced_exit_pending_count=(
+                len(analysis.pending_forced_exit_instruments) if phase != "buy" else 0
+            ),
+            normal_sell_count=analysis.normal_sell_count if phase != "buy" else 0,
+            executable_sell_count=analysis.executable_sell_count if phase != "buy" else 0,
+            remaining_after_sell=remaining_after_sell,
+            planned_final_holding_count=planned_final_holding_count,
             sell_decisions=sell_decisions,
         )
 
@@ -340,6 +380,7 @@ class OrderGenerationService:
             forced_exit_count=calculation.forced_exit_count,
             forced_exit_pending_count=calculation.forced_exit_pending_count,
             normal_sell_count=calculation.normal_sell_count,
+            phase=prepared.execution_options.phase,
         )
 
     def _write_success_manifest(
@@ -401,7 +442,12 @@ class OrderGenerationService:
                 calculation.source_label,
             )
             print("\n[DRY-RUN] 以下文件不会被写入:")
-            for path in (preview.opinion_csv, preview.opinion_json, preview.sell_csv, preview.buy_csv):
+            preview_paths = [preview.opinion_csv, preview.opinion_json]
+            if prepared.execution_options.phase in ("all", "sell"):
+                preview_paths.append(preview.sell_csv)
+            if prepared.execution_options.phase in ("all", "buy"):
+                preview_paths.append(preview.buy_csv)
+            for path in preview_paths:
                 print(f"  {path}")
             print("\n# ✅ 订单生成完成!")
             print(f"📊 预测来源 : {calculation.source_description}")

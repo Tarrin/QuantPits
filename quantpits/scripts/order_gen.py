@@ -24,6 +24,10 @@ Order Generation - 基于融合/单模型预测生成买卖订单
   # 仅预览
   python quantpits/scripts/order_gen.py --dry-run
 
+  # 分阶段执行：先卖出，再在成交/持仓更新后买入
+  python quantpits/scripts/order_gen.py --phase sell
+  python quantpits/scripts/order_gen.py --phase buy
+
 参数：
   --model            使用单模型预测（从 Qlib 记录加载）
   --output-dir       输出目录 (默认 output)
@@ -31,6 +35,7 @@ Order Generation - 基于融合/单模型预测生成买卖订单
   --verbose          显示详细的排名和价格信息
   --explain-plan     仅打印轻量执行计划，不初始化 Qlib
   --json-plan        输出机器可读 JSON 计划
+  --phase            订单阶段：all（默认）、sell 或 buy
 """
 
 import os
