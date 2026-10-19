@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Phased order generation (`--phase all|sell|buy`) with a validated read-only account snapshot for buy-only runs, so sells can settle before replacement buys are planned.
+- `rank_buffer` strategy: separate buy/sell rank thresholds (`topk <= buy_rank <= sell_rank`) with a Qlib backtest adapter and config-contract validation.
+- TSMixer backbone for `GeneralPTNN` (`pt_model_uri`), registered in the model capability catalog.
+- Monte Carlo monkey baseline experiment suite: seeded null portfolios on Qlib's native backtester, matched CSI300 equal-weight controls, rolling monkey plans, and IC/logic audit and reporting scripts.
+
 ### Changed
 
 - Order generation now observes exact anchor-date universe membership, prioritizes forced exits within the DropN policy, retains unscored holdings in account arithmetic, and records classification/count evidence in run manifests.

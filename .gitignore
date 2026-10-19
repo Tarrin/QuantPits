@@ -188,6 +188,7 @@ workspaces/Demo_Workspace/mlruns/*
 !workspaces/Demo_Workspace/mlruns/.gitkeep
 workspaces/Demo_Workspace/data/*
 !workspaces/Demo_Workspace/data/.gitkeep
+workspaces/Demo_Workspace/latest_train_records.json
 
 *.log
 *.zip
