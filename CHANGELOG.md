@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Real training commands and run manifests now work on Windows: the workspace execution lease uses `msvcrt` byte-range locking when `fcntl` is unavailable, and POSIX-only directory fsync calls are skipped on Windows instead of failing with Errno 13.
+- Order artifact persistence fsyncs its staged file through a writable handle so `order_gen` no longer fails with `Errno 9` on Windows.
 
 ### Added
 

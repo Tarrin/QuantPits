@@ -11,6 +11,7 @@ from typing import Any
 
 from quantpits.order.opinions import ModelOpinionsResult, to_json_payload
 from quantpits.runtime import OutputRef
+from quantpits.utils.durability import fsync_file
 from quantpits.utils.workspace import WorkspaceContext
 
 
@@ -72,8 +73,7 @@ def _atomic_write(path: Path, writer) -> None:
     temp = Path(temp_name)
     try:
         writer(temp)
-        with temp.open("rb") as handle:
-            os.fsync(handle.fileno())
+        fsync_file(temp)
         os.replace(temp, path)
     finally:
         if temp.exists():

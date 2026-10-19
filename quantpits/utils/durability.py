@@ -42,6 +42,21 @@ except ImportError:  # pragma: no cover - production is Linux
     flock_compat = _MsvcrtFlockShim
 
 
+def fsync_file(path: Path | str) -> None:
+    """Flush a regular file's contents to stable storage.
+
+    Windows rejects fsync on read-only descriptors (EBADF), so the handle is
+    opened read-write there; POSIX keeps O_RDONLY.
+    """
+
+    flags = os.O_RDWR if os.name == "nt" else os.O_RDONLY
+    descriptor = os.open(str(path), flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def fsync_directory(path: Path | str) -> None:
     """Flush a directory entry so a just-replaced file survives power loss.
 
@@ -60,4 +75,4 @@ def fsync_directory(path: Path | str) -> None:
         os.close(directory_fd)
 
 
-__all__ = ["flock_compat", "fsync_directory"]
+__all__ = ["flock_compat", "fsync_directory", "fsync_file"]
